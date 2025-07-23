@@ -1078,7 +1078,7 @@ with tab_mensal:
                 mime="text/csv"
             )
 
-# ABA DIÁRIA (implementação completa com filtros corrigidos)
+# ABA DIÁRIA (implementação completa com autenticação)
 with tab_diaria:
     st.header("📊 Análise Diária de Produtos")
     
@@ -1086,7 +1086,6 @@ with tab_diaria:
     
     if not df_daily.empty:
         # Sidebar para filtros da análise diária
-        st.sidebar.markdown("---")
         st.sidebar.header("⚙️ Filtros Análise Diária")
         
         # Filtro de período com padrão mês atual
@@ -1106,8 +1105,7 @@ with tab_diaria:
             value=(default_start, default_end),
             min_value=min_date,
             max_value=max_date,
-            help="Selecione o período para análise",
-            key="daily_date_filter"
+            help="Selecione o período para análise"
         )
         
         if len(date_range) == 2:
@@ -1118,32 +1116,24 @@ with tab_diaria:
             period_start = pd.to_datetime(default_start)
             period_end = pd.to_datetime(default_end)
         
-        # Filtrar dados pelo período PRIMEIRO
-        df_filtered = df_daily[(df_daily['data'] >= period_start) & (df_daily['data'] <= period_end)].copy()
+        # Filtrar dados pelo período
+        df_filtered = df_daily[(df_daily['data'] >= period_start) & (df_daily['data'] <= period_end)]
         
-        # Filtro de produtos (baseado nos dados já filtrados por data)
-        if not df_filtered.empty:
-            all_products = sorted(df_filtered['nome_universal'].unique())
-            selected_products = st.sidebar.multiselect(
-                "🏷️ Filtrar Produtos",
-                options=all_products,
-                default=[],
-                help="Deixe vazio para incluir todos os produtos",
-                key="daily_product_filter"
-            )
-            
-            # Aplicar filtro de produtos se selecionados
-            if selected_products:
-                df_filtered = df_filtered[df_filtered['nome_universal'].isin(selected_products)]
-        else:
-            selected_products = []
+        # Filtro de produtos
+        all_products = sorted(df_daily['nome_universal'].unique())
+        selected_products = st.sidebar.multiselect(
+            "🏷️ Filtrar Produtos",
+            options=all_products,
+            default=[],
+            help="Deixe vazio para incluir todos os produtos"
+        )
+        
+        if selected_products:
+            df_filtered = df_filtered[df_filtered['nome_universal'].isin(selected_products)]
         
         if not df_filtered.empty:
             # Indicador de segurança
             st.success("🔐 Dados carregados com segurança via autenticação Google - Planilhas privadas!")
-            
-            # Mostrar período selecionado
-            st.info(f"📅 **Período analisado:** {period_start.strftime('%d/%m/%Y')} a {period_end.strftime('%d/%m/%Y')} ({len(df_filtered)} registros)")
             
             # KPIs Principais
             st.subheader("📈 Indicadores Principais")
@@ -1204,7 +1194,7 @@ with tab_diaria:
             col_chart1, col_chart2 = st.columns(2)
             
             with col_chart1:
-                # Faturamento por dia (usando dados filtrados)
+                # Faturamento por dia
                 daily_sales = df_filtered.groupby('data')['faturamento'].sum().reset_index()
                 
                 fig_daily_sales = px.line(
@@ -1222,7 +1212,7 @@ with tab_diaria:
                 st.plotly_chart(fig_daily_sales, use_container_width=True)
             
             with col_chart2:
-                # Pedidos por dia (usando dados filtrados)
+                # Pedidos por dia
                 daily_orders = df_filtered.groupby('data')['quantidade_pedidos'].sum().reset_index()
                 
                 fig_daily_orders = px.bar(
@@ -1239,7 +1229,7 @@ with tab_diaria:
                 )
                 st.plotly_chart(fig_daily_orders, use_container_width=True)
             
-            # Top 10 Produtos (usando dados filtrados)
+            # Top 10 Produtos
             st.subheader("🏆 Top 10 Produtos por Faturamento")
             
             top_products = df_filtered.groupby('nome_universal').agg({
@@ -1282,7 +1272,7 @@ with tab_diaria:
                         </div>
                         """, unsafe_allow_html=True)
             
-            # Análise de Sazonalidade (usando dados filtrados)
+            # Análise de Sazonalidade
             st.subheader("📅 Análise de Sazonalidade")
             
             col_season1, col_season2 = st.columns(2)
@@ -1315,7 +1305,7 @@ with tab_diaria:
                 st.plotly_chart(fig_weekday, use_container_width=True)
             
             with col_season2:
-                # Heatmap de performance por produto e dia da semana (usando dados filtrados)
+                # Heatmap de performance por produto e dia da semana
                 if len(df_filtered) > 0:
                     heatmap_data = df_filtered.groupby(['nome_universal', 'dia_semana'])['faturamento'].sum().unstack(fill_value=0)
                     
@@ -1338,7 +1328,7 @@ with tab_diaria:
                         )
                         st.plotly_chart(fig_heatmap, use_container_width=True)
             
-            # Comparativo de Períodos (usando dados filtrados)
+            # Comparativo de Períodos
             st.subheader("📊 Comparativo de Períodos")
             
             # Calcular período anterior
@@ -1346,10 +1336,7 @@ with tab_diaria:
             previous_start = period_start - timedelta(days=period_days)
             previous_end = period_start - timedelta(days=1)
             
-            # Filtrar período anterior (aplicando os mesmos filtros de produto se houver)
             df_previous = df_daily[(df_daily['data'] >= previous_start) & (df_daily['data'] <= previous_end)]
-            if selected_products:
-                df_previous = df_previous[df_previous['nome_universal'].isin(selected_products)]
             
             if not df_previous.empty:
                 # Métricas comparativas
@@ -1394,7 +1381,7 @@ with tab_diaria:
                     </div>
                     """, unsafe_allow_html=True)
             
-            # Alertas e Insights (usando dados filtrados)
+            # Alertas e Insights
             st.subheader("⚠️ Alertas e Insights")
             
             col_alerts, col_insights = st.columns([1, 1])
@@ -1416,7 +1403,7 @@ with tab_diaria:
             
             with col_insights:
                 st.markdown("**💡 Insights Automáticos**")
-                insights = generate_insights(df_filtered, period_start, period_end)
+                insights = generate_insights(df_daily, period_start, period_end)
                 
                 for insight in insights:
                     st.markdown(f"""
@@ -1425,7 +1412,7 @@ with tab_diaria:
                     </div>
                     """, unsafe_allow_html=True)
             
-            # Tabela Detalhada (usando dados filtrados)
+            # Tabela Detalhada
             st.subheader("📋 Dados Detalhados")
             
             # Preparar dados para exibição
@@ -1453,7 +1440,7 @@ with tab_diaria:
             
             st.dataframe(display_df, use_container_width=True, height=400)
             
-            # Botão de export (usando dados filtrados)
+            # Botão de export
             csv_data = df_filtered.to_csv(index=False)
             st.download_button(
                 label="📥 Exportar Dados (CSV)",
