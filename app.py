@@ -880,12 +880,7 @@ def color_delta(val):
     else:
         return "color: gray;"
 
-# Adicione no seu bloco de tabs
-tabs = st.tabs([
-    "Top Produtos", "Top Cidades", "Top Estados", "Resumo Diário"
-])
-
-with tabs[3]:
+with Tab_diario:
     st.header("📆 Resumo Diário de Vendas")
     df_diario = carregar_diario(planilha_diaria_id, ABA_DIARIA)
 
