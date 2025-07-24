@@ -354,7 +354,7 @@ st.markdown("---")
 # --- Análise de Desempenho (Produtos, Cidades, Estados) ---
 st.header("📈 Análise de Desempenho")
 
-tab_produtos, tab_cidades, tab_estados = st.tabs(["Top Produtos", "Top Cidades", "Top Estados"])
+tab_produtos, tab_cidades, tab_estados, Tab_diario = st.tabs(["Top Produtos", "Top Cidades", "Top Estados", "Resumo Diário"])
 
 with tab_produtos:
     st.subheader("Top Produtos por Métrica")
@@ -836,3 +836,258 @@ with col2:
             file_name=f"resumo_executivo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv"
         )
+
+ # ---------------------- ABA "Resumo Diário" --------------------------
+
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime, timedelta
+
+# IDs e ABA das planilhas
+planilha_diaria_id = "1cERMKGnnCH0y_C29QNfT__7zeB4bHVHaxdA3fTDcaxs"
+ABA_DIARIA = "ResumoDiarioProdutos"
+
+# Função para conectar e ler a aba diária
+@st.cache_resource
+def carregar_diario(sheet_id, aba, json_path="service_account.json"):
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(json_path, scope)
+    client = gspread.authorize(creds)
+    worksheet = client.open_by_key(sheet_id).worksheet(aba)
+    df = pd.DataFrame(worksheet.get_all_records())
+    return df
+
+def moeda_brl(val):
+    try:
+        return f"R$ {float(val):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except: return val
+
+def inteiro_brl(val):
+    try:
+        return f"{int(val):,}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except: return val
+
+def color_delta(val):
+    if isinstance(val, str) and ("—" in val or "-" in val and len(val.strip()) == 1):
+        return "color: gray;"
+    if val > 0:
+        return "color: green;"
+    elif val < 0:
+        return "color: red;"
+    else:
+        return "color: gray;"
+
+# Adicione no seu bloco de tabs
+tabs = st.tabs([
+    "Top Produtos", "Top Cidades", "Top Estados", "Resumo Diário"
+])
+
+with tabs[3]:
+    st.header("📆 Resumo Diário de Vendas")
+    df_diario = carregar_diario(planilha_diaria_id, ABA_DIARIA)
+
+    # --- Conversão de tipos
+    df_diario["data"] = pd.to_datetime(df_diario["data"], format="%d/%m/%Y", errors="coerce")
+    df_diario = df_diario.dropna(subset=["data"])
+    for col in ["faturamento", "total_unidades", "quantidade_pedidos"]:
+        df_diario[col] = pd.to_numeric(df_diario[col], errors="coerce")
+
+    # --- Filtros
+    hoje = datetime.now().date()
+    primeiro_dia_mes = hoje.replace(day=1)
+    ontem = hoje - timedelta(days=1)
+    min_data = df_diario["data"].min().date()
+    max_data = df_diario["data"].max().date()
+    data_ini, data_fim = st.date_input(
+        "Período", [primeiro_dia_mes, ontem], min_value=min_data, max_value=max_data
+    )
+    prods = sorted(df_diario["nome_universal"].dropna().unique())
+    prod_sel = st.multiselect("Produto", prods, default=prods)
+    skus = sorted(df_diario["sku"].dropna().unique())
+    sku_sel = st.multiselect("SKU", skus, default=skus)
+    estados = sorted(df_diario["estado"].dropna().unique()) if "estado" in df_diario.columns else []
+    estado_sel = st.multiselect("Estado", estados, default=estados) if estados else []
+
+    mask = (
+        (df_diario["data"].dt.date >= data_ini) & (df_diario["data"].dt.date <= data_fim) &
+        (df_diario["nome_universal"].isin(prod_sel)) &
+        (df_diario["sku"].isin(sku_sel))
+    )
+    if "estado" in df_diario.columns and estado_sel:
+        mask &= df_diario["estado"].isin(estado_sel)
+    df_filt = df_diario[mask].copy()
+    st.success(f"{len(df_filt)} registros encontrados no filtro selecionado.")
+
+    # --------------- 1) Indicadores Parciais por Mês ----------------
+    st.markdown("### 1) Indicadores Parciais por Mês")
+    df_parcial = df_diario.copy()
+    df_parcial = df_parcial[(df_parcial["data"].dt.date >= min_data) & (df_parcial["data"].dt.date <= data_fim)]
+
+    df_parcial["ano_mes"] = df_parcial["data"].dt.strftime("%Y-%m")
+    res = df_parcial.groupby("ano_mes").agg({
+        "quantidade_pedidos": "sum",
+        "faturamento": "sum",
+        "total_unidades": "sum"
+    }).reset_index()
+    res = res.sort_values("ano_mes")
+    res["ticket_medio"] = res["faturamento"] / res["quantidade_pedidos"]
+
+    # Calculo dos deltas
+    res["Δ Pedidos"] = res["quantidade_pedidos"].diff().fillna(0).astype(int)
+    res["% Pedidos"] = res["quantidade_pedidos"].pct_change().fillna(0)*100
+    res["Δ Faturamento"] = res["faturamento"].diff().fillna(0)
+    res["% Faturamento"] = res["faturamento"].pct_change().fillna(0)*100
+
+    res["Δ Pedidos"] = res["Δ Pedidos"].apply(lambda x: "—" if x==0 else int(x))
+    res["% Pedidos"] = res["% Pedidos"].apply(lambda x: "—" if x==0 else f"{x:.2f}%")
+    res["Δ Faturamento"] = res["Δ Faturamento"].apply(lambda x: "—" if x==0 else moeda_brl(x))
+    res["% Faturamento"] = res["% Faturamento"].apply(lambda x: "—" if x==0 else f"{x:.2f}%")
+
+    res["Faturamento (R$)"] = res["faturamento"].apply(moeda_brl)
+    res["Pedidos (até dia "+str(data_fim.day)+")"] = res["quantidade_pedidos"]
+    res["Ticket Médio"] = res["ticket_medio"].apply(moeda_brl)
+
+    tabela = res[[
+        "ano_mes", "Pedidos (até dia "+str(data_fim.day)+")", "Δ Pedidos", "% Pedidos",
+        "Faturamento (R$)", "Ticket Médio", "Δ Faturamento", "% Faturamento"
+    ]].rename(columns={"ano_mes":"Mês"})
+
+    def highlight_delta(s):
+        styles = []
+        for val in s:
+            if isinstance(val, str) and val.startswith("—"):
+                styles.append("color: gray;")
+            elif isinstance(val, str) and "-" in val:
+                styles.append("color: red;")
+            elif isinstance(val, str) and (val.replace(",", "").replace(".", "").replace("%", "").isdigit()):
+                styles.append("color: green;")
+            else:
+                styles.append("color: gray;")
+        return styles
+
+    st.dataframe(
+        tabela.style.apply(highlight_delta, subset=["Δ Pedidos", "% Pedidos", "Δ Faturamento", "% Faturamento"], axis=0),
+        use_container_width=True
+    )
+
+    # --------------- 2) Evolução diária de faturamento por produto ---------------
+    st.markdown("### 2) Evolução Diária de Faturamento por Produto")
+    produtos_comp = st.multiselect(
+        "Produtos para comparar evolução",
+        options=prods,
+        default=prods[:min(3, len(prods))],
+        key="prodcompdiario"
+    )
+    df_evo = df_filt[df_filt["nome_universal"].isin(produtos_comp)]
+    df_faturamento = df_evo.groupby(["data", "nome_universal"], as_index=False)["faturamento"].sum()
+    fig_fat = px.line(
+        df_faturamento,
+        x="data", y="faturamento", color="nome_universal",
+        labels={"data": "Data", "faturamento": "Faturamento (R$)", "nome_universal": "Produto"},
+        markers=True
+    )
+    fig_fat.update_layout(hovermode="x unified")
+    fig_fat.update_yaxes(tickformat=",.0f")
+    fig_fat.update_xaxes(tickformat="%d/%m/%Y")
+    st.plotly_chart(fig_fat, use_container_width=True)
+
+    # --------------- 3) Top produtos por período ---------------
+    st.markdown("### 3) Top Produtos no Período Selecionado")
+    df_top_fat = df_filt.groupby("nome_universal")["faturamento"].sum().sort_values(ascending=False).head(10).reset_index()
+    fig_top_fat = px.bar(
+        df_top_fat, x="faturamento", y="nome_universal", orientation="h",
+        labels={"faturamento": "Faturamento (R$)", "nome_universal": "Produto"},
+        title="Top Produtos por Faturamento",
+        color="faturamento", color_continuous_scale=px.colors.sequential.Blugrn
+    )
+    fig_top_fat.update_layout(yaxis={'categoryorder':'total ascending'})
+    fig_top_fat.update_xaxes(tickformat=",.0f")
+    st.plotly_chart(fig_top_fat, use_container_width=True)
+
+    df_top_unid = df_filt.groupby("nome_universal")["total_unidades"].sum().sort_values(ascending=False).head(10).reset_index()
+    fig_top_unid = px.bar(
+        df_top_unid, x="total_unidades", y="nome_universal", orientation="h",
+        labels={"total_unidades": "Unidades Vendidas", "nome_universal": "Produto"},
+        title="Top Produtos por Unidades Vendidas",
+        color="total_unidades", color_continuous_scale=px.colors.sequential.Viridis
+    )
+    fig_top_unid.update_layout(yaxis={'categoryorder':'total ascending'})
+    fig_top_unid.update_xaxes(tickformat=",.0f")
+    st.plotly_chart(fig_top_unid, use_container_width=True)
+
+    # --------------- 4) Vendas por Estado ---------------
+    if "estado" in df_filt.columns and len(df_filt["estado"].unique()) > 1:
+        st.markdown("### 4) Análise de Vendas por Estado")
+        df_estado = df_filt.groupby("estado")["faturamento"].sum().sort_values(ascending=False).reset_index()
+        fig_estado = px.bar(
+            df_estado, x="estado", y="faturamento",
+            labels={"faturamento": "Faturamento (R$)", "estado": "Estado"},
+            title="Faturamento por Estado",
+            color="faturamento", color_continuous_scale=px.colors.sequential.Blues
+        )
+        st.plotly_chart(fig_estado, use_container_width=True)
+        st.dataframe(df_estado.rename(columns={"faturamento":"Faturamento (R$)"}))
+
+    # --------------- 5) Comparativo parcial de produtos ---------------
+    st.markdown("### 5) Comparativo Parcial de Produtos")
+    with st.expander("Selecionar períodos para comparar"):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("Período A (atual)")
+            periodo_a_ini = st.date_input("Início Período A", value=data_ini, key="a_ini")
+            periodo_a_fim = st.date_input("Fim Período A", value=data_fim, key="a_fim")
+        with col2:
+            st.write("Período B (comparação)")
+            periodo_b_ini = st.date_input("Início Período B", value=periodo_a_ini-timedelta(days=(data_fim-data_ini).days+1), key="b_ini")
+            periodo_b_fim = st.date_input("Fim Período B", value=periodo_a_ini-timedelta(days=1), key="b_fim")
+
+    mask_a = (df_diario["data"].dt.date >= periodo_a_ini) & (df_diario["data"].dt.date <= periodo_a_fim)
+    mask_b = (df_diario["data"].dt.date >= periodo_b_ini) & (df_diario["data"].dt.date <= periodo_b_fim)
+    prods_compare = st.multiselect("Produtos para comparação", prods, default=prods[:5], key="prodcomp2")
+    df_a = df_diario[mask_a & df_diario["nome_universal"].isin(prods_compare)]
+    df_b = df_diario[mask_b & df_diario["nome_universal"].isin(prods_compare)]
+    sum_a = df_a.groupby("nome_universal").agg({"faturamento":"sum", "total_unidades":"sum"}).rename(columns={"faturamento":"Faturamento A", "total_unidades":"Unidades A"})
+    sum_b = df_b.groupby("nome_universal").agg({"faturamento":"sum", "total_unidades":"sum"}).rename(columns={"faturamento":"Faturamento B", "total_unidades":"Unidades B"})
+    comparativo = sum_a.join(sum_b, how="outer").fillna(0)
+    comparativo["Δ Faturamento"] = comparativo["Faturamento A"] - comparativo["Faturamento B"]
+    comparativo["% Δ Fat"] = comparativo.apply(lambda x: 100*(x["Δ Faturamento"]/x["Faturamento B"]) if x["Faturamento B"] else 0, axis=1)
+    comparativo["Δ Unidades"] = comparativo["Unidades A"] - comparativo["Unidades B"]
+    comparativo["% Δ Unid"] = comparativo.apply(lambda x: 100*(x["Δ Unidades"]/x["Unidades B"]) if x["Unidades B"] else 0, axis=1)
+    comparativo_fmt = comparativo.reset_index()
+    comparativo_fmt["Faturamento A"] = comparativo_fmt["Faturamento A"].apply(moeda_brl)
+    comparativo_fmt["Faturamento B"] = comparativo_fmt["Faturamento B"].apply(moeda_brl)
+    comparativo_fmt["Δ Faturamento"] = comparativo_fmt["Δ Faturamento"].apply(moeda_brl)
+    comparativo_fmt["% Δ Fat"] = comparativo_fmt["% Δ Fat"].apply(lambda x: f"{x:.2f}%")
+    comparativo_fmt["Δ Unidades"] = comparativo_fmt["Δ Unidades"].apply(inteiro_brl)
+    comparativo_fmt["% Δ Unid"] = comparativo_fmt["% Δ Unid"].apply(lambda x: f"{x:.2f}%")
+    st.dataframe(comparativo_fmt, use_container_width=True)
+
+    # --------------- 6) Produtos Mais Comprados Juntos (Market Basket) ---------------
+    st.markdown("### 6) Produtos Mais Comprados Juntos")
+    # Market Basket simplificado (par de produtos mais frequentes por dia)
+    from itertools import combinations
+    df_basket = df_filt.groupby(["data", "sku"])["nome_universal"].first().reset_index()
+    compras_por_dia = df_basket.groupby("data")["nome_universal"].apply(list)
+    pares = []
+    for produtos in compras_por_dia:
+        if len(produtos) > 1:
+            pares += list(combinations(sorted(set(produtos)), 2))
+    from collections import Counter
+    contagem_pares = Counter(pares)
+    df_pares = pd.DataFrame(contagem_pares.items(), columns=["Par de Produtos", "Qtd Dias Juntos"])
+    df_pares = df_pares.sort_values("Qtd Dias Juntos", ascending=False).head(10)
+    st.dataframe(df_pares, use_container_width=True)
+
+    # --------------- 7) Download CSV dos dados filtrados ---------------
+    st.markdown("### 📥 Baixar dados filtrados")
+    csv = df_filt.to_csv(index=False, sep=";", decimal=",").encode("utf-8")
+    st.download_button(
+        label="Baixar CSV dos dados filtrados",
+        data=csv,
+        file_name="resumodiario_filtrado.csv",
+        mime="text/csv"
+    )
+       
