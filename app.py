@@ -5,6 +5,17 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import numpy as np
 import io
+import json
+
+# Tentar importar bibliotecas do Google
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GOOGLE_AUTH_AVAILABLE = True
+except ImportError:
+    GOOGLE_AUTH_AVAILABLE = False
+    st.warning("⚠️ Bibliotecas do Google não disponíveis. Usando método público.")
+
 # Assegure-se de que 'column_mapping.py' esteja na mesma pasta
 from column_mapping import column_mapping
 
@@ -36,6 +47,39 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Função para autenticação Google
+def get_google_client():
+    """Tenta autenticar com Google usando credenciais dos secrets"""
+    if not GOOGLE_AUTH_AVAILABLE:
+        return None
+    
+    try:
+        # Tentar obter credenciais dos secrets
+        google_credentials = st.secrets.get("google_credentials")
+        if google_credentials:
+            # Parse das credenciais JSON
+            creds_dict = json.loads(google_credentials)
+            
+            # Definir escopos necessários
+            scopes = [
+                'https://www.googleapis.com/auth/spreadsheets.readonly',
+                'https://www.googleapis.com/auth/drive.readonly'
+            ]
+            
+            # Criar credenciais
+            credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+            
+            # Criar cliente gspread
+            client = gspread.authorize(credentials)
+            
+            return client
+        else:
+            return None
+    except Exception as e:
+        st.warning(f"⚠️ Erro na autenticação Google: {e}")
+        return None
+
 senha_correta = st.secrets["app_password"]
 
 # Controle de autenticação na sessão
@@ -55,6 +99,7 @@ if not st.session_state.autenticado:
         elif senha != "":
             st.error("❌ Senha incorreta. Tente novamente.")
     st.stop() 
+
 # CSS personalizado para visual mais bonito
 st.markdown("""
 <style>
@@ -138,223 +183,306 @@ st.markdown("""
 # Título Principal do Dashboard
 st.markdown("<h1 class='main-header'>Dashboard de Análise de Produtos e Cidades 🏙️</h1>", unsafe_allow_html=True)
 
+# Verificar autenticação Google
+google_client = get_google_client()
+if google_client:
+    st.success("🔐 Dados carregados com segurança via autenticação Google!")
+else:
+    st.info("📊 Dados carregados via método público.")
+
 @st.cache_data
 def load_data():
     """
-    Carrega e pré-processa os dados da planilha do Google Sheets.
+    Carrega e pré-processa os dados da planilha MENSAL do Google Sheets.
     """
-    # **IMPORTANTE**: Certifique-se que esta URL e o nome da aba estão corretos e a planilha é pública para leitura.
-    sheet_id = '14Y-V3ezwo3LsHWERhSyURCtkQdN3drzv9F5JNRQnXEc'
+    # PLANILHA MENSAL CORRETA
+    sheet_id = st.secrets.get("planilha_mensal_id", '14Y-V3ezwo3LsHWERhSyURCtkQdN3drzv9F5JNRQnXEc')
     tab_name = 'Produtos_Cidades_Completas'
-    google_sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={tab_name}"
-
-    with st.spinner("Carregando dados... Por favor, aguarde."):
+    
+    with st.spinner("Carregando dados mensais... Por favor, aguarde."):
         try:
-            df = pd.read_csv(google_sheet_url)
+            if google_client:
+                # Usar autenticação Google
+                sheet = google_client.open_by_key(sheet_id)
+                worksheet = sheet.worksheet(tab_name)
+                data = worksheet.get_all_records()
+                df = pd.DataFrame(data)
+            else:
+                # Fallback para método público
+                google_sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={tab_name}"
+                df = pd.read_csv(google_sheet_url)
         except Exception as e:
-            st.error(f"Erro ao carregar dados da planilha do Google Sheets: {e}")
-            st.warning("Por favor, verifique se o ID da planilha e o nome da aba estão corretos e se a planilha está compartilhada como 'Qualquer pessoa com o link'.")
+            st.error(f"Erro ao carregar dados da planilha mensal: {e}")
             st.stop()
 
     if df.empty:
-        st.warning("A planilha do Google Sheets está vazia ou não contém dados. Verifique a planilha ou os filtros iniciais.")
+        st.warning("A planilha mensal está vazia.")
         st.stop()
 
-    # Convert 'mes' to datetime objects
+    # Converter a coluna 'mes' para datetime
     df['mes'] = pd.to_datetime(df['mes'], format='%Y-%m')
 
-    # Conversão robusta de colunas numéricas:
+    # Converter colunas numéricas, tratando vírgulas como separadores decimais
     df.loc[:, 'faturamento'] = pd.to_numeric(df['faturamento'].astype(str).str.replace(',', '.', regex=False), errors='coerce').fillna(0)
     df.loc[:, 'faturamento_total_cidade_mes'] = pd.to_numeric(df['faturamento_total_cidade_mes'].astype(str).str.replace(',', '.', regex=False), errors='coerce').fillna(0)
-
     df.loc[:, 'unidades_fisicas'] = pd.to_numeric(df['unidades_fisicas'], errors='coerce').fillna(0)
     df.loc[:, 'pedidos'] = pd.to_numeric(df['pedidos'], errors='coerce').fillna(0)
     df.loc[:, 'total_pedidos_cidade_mes'] = pd.to_numeric(df['total_pedidos_cidade_mes'], errors='coerce').fillna(0)
 
-    # Renomear colunas para nomes amigáveis usando o mapping importado
+    # Renomear colunas usando o mapeamento
     df = df.rename(columns=column_mapping)
 
-    # Calcular Métricas Derivadas usando os nomes de coluna já renomeados
+    # Calcular colunas derivadas
     df.loc[:, 'Participação Faturamento Cidade Mês (%)'] = np.where(
-        df['Faturamento Total da Cidade no Mês'] == 0,
-        0,
+        df['Faturamento Total da Cidade no Mês'] == 0, 0,
         (df['Faturamento do Produto'] / df['Faturamento Total da Cidade no Mês']) * 100
     )
-
     df.loc[:, 'Participação Pedidos Cidade Mês (%)'] = np.where(
-        df['Total de Pedidos da Cidade no Mês'] == 0,
-        0,
+        df['Total de Pedidos da Cidade no Mês'] == 0, 0,
         (df['Pedidos com Produto'] / df['Total de Pedidos da Cidade no Mês']) * 100
     )
-
     df.loc[:, 'Ticket Médio do Produto'] = np.where(
-        df['Pedidos com Produto'] == 0,
-        0,
+        df['Pedidos com Produto'] == 0, 0,
         df['Faturamento do Produto'] / df['Pedidos com Produto']
     )
+
     return df
 
+@st.cache_data
+def load_daily_data():
+    """Carrega dados da planilha DIÁRIA"""
+    # PLANILHA DIÁRIA CORRETA
+    sheet_id = st.secrets.get("planilha_diaria_id", '1cERMKGnnCH0y_C29QNfT__7zeB4bHVHaxdA3fTDcaxs')
+    tab_name = 'ResumoDiarioProdutos'
+
+    with st.spinner("Carregando dados diários..."):
+        try:
+            if google_client:
+                # Usar autenticação Google
+                sheet = google_client.open_by_key(sheet_id)
+                worksheet = sheet.worksheet(tab_name)
+                data = worksheet.get_all_records()
+                df = pd.DataFrame(data)
+            else:
+                # Fallback para método público
+                google_sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={tab_name}"
+                df = pd.read_csv(google_sheet_url)
+        except Exception as e:
+            st.error(f"Erro ao carregar dados diários: {e}")
+            return pd.DataFrame()
+
+    if df.empty:
+        st.warning("A planilha diária está vazia.")
+        return pd.DataFrame()
+
+    # Converter data e tratar formatação CORRETAMENTE
+    df['data'] = pd.to_datetime(df['data'], format='%d/%m/%Y', errors='coerce')
+    # CORREÇÃO: tratar vírgula como decimal
+    df['faturamento'] = df['faturamento'].astype(str).str.replace(',', '.').astype(float)
+    df['quantidade_pedidos'] = pd.to_numeric(df['quantidade_pedidos'], errors='coerce').fillna(0)
+    df['total_unidades'] = pd.to_numeric(df['total_unidades'], errors='coerce').fillna(0)
+
+    # Adicionar colunas derivadas
+    df['dia_semana'] = df['data'].dt.day_name()
+    df['mes'] = df['data'].dt.to_period('M').astype(str)
+
+    return df
+
+# Carregar dados MENSAIS
 df = load_data()
 
-# --- Sidebar para Filtros ---
+# Sidebar com filtros PARA ANÁLISE MENSAL
 st.sidebar.header("⚙️ Filtros Globais")
 
-# Botão de Resetar Filtros
+# Botão para resetar filtros
 if st.sidebar.button("🔄 Resetar Filtros"):
-    st.session_state['selected_months'] = []
-    st.session_state['selected_estados'] = []
-    st.session_state['selected_cidades'] = []
-    st.session_state['selected_produtos'] = []
-    # Recarrega a página para aplicar o reset
-    st.experimental_rerun()
+    # Limpar os filtros da sessão
+    for key in ['selected_months', 'selected_estados', 'selected_cidades', 'selected_produtos']:
+        if key in st.session_state:
+            del st.session_state[key]
+    st.rerun()
 
-# Recupera valores padrão ou do session_state
-min_date = df['Mês'].min()
-max_date = df['Mês'].max()
-
-available_months = sorted(df['Mês'].dt.to_period('M').unique().to_timestamp().tolist())
-
-# Usa session_state para manter o estado dos filtros após o reset
-if 'selected_months' not in st.session_state:
-    st.session_state['selected_months'] = available_months
-if 'selected_estados' not in st.session_state:
-    st.session_state['selected_estados'] = sorted(df['Estado'].unique())
-if 'selected_cidades' not in st.session_state:
-    st.session_state['selected_cidades'] = sorted(df['Cidade'].unique())
-if 'selected_produtos' not in st.session_state:
-    st.session_state['selected_produtos'] = []
-
-
+# Filtro de Mês
+meses_disponiveis = sorted(df['Mês'].dt.strftime('%Y-%m').unique())
 selected_months = st.sidebar.multiselect(
-    "Selecione o(s) Mês(es)",
-    options=available_months,
-    default=st.session_state['selected_months'],
-    format_func=lambda x: x.strftime('%Y-%m'),
-    key='month_filter' # Adicionado key para controle do estado
+    "📅 Selecione os meses:",
+    options=meses_disponiveis,
+    default=st.session_state.get('selected_months', []),
+    key='selected_months'
 )
 
+# Aplicar filtro de mês primeiro
+if selected_months:
+    df_filtered = df[df['Mês'].dt.strftime('%Y-%m').isin(selected_months)]
+else:
+    df_filtered = df.copy()
 
 # Filtro de Estado
-all_estados = sorted(df['Estado'].unique())
+estados_disponiveis = sorted(df_filtered['Estado'].unique())
 selected_estados = st.sidebar.multiselect(
-    "Selecione o(s) Estado(s)",
-    options=all_estados,
-    default=st.session_state['selected_estados'],
-    key='estado_filter' # Adicionado key para controle do estado
+    "🗺️ Selecione os estados:",
+    options=estados_disponiveis,
+    default=st.session_state.get('selected_estados', []),
+    key='selected_estados'
 )
 
-# Filtro de Cidade (dependente do estado)
+# Aplicar filtro de estado
 if selected_estados:
-    available_cidades = sorted(df[df['Estado'].isin(selected_estados)]['Cidade'].unique())
-else:
-    available_cidades = sorted(df['Cidade'].unique())
+    df_filtered = df_filtered[df_filtered['Estado'].isin(selected_estados)]
 
-default_cidades_validas = [c for c in st.session_state['selected_cidades'] if c in available_cidades]
+# Filtro de Cidade
+cidades_disponiveis = sorted(df_filtered['Cidade'].unique())
 selected_cidades = st.sidebar.multiselect(
-    "Selecione a(s) Cidade(s)",
-    options=available_cidades,
-    default=default_cidades_validas,
-    key='cidade_filter'
+    "🏙️ Selecione as cidades:",
+    options=cidades_disponiveis,
+    default=st.session_state.get('selected_cidades', []),
+    key='selected_cidades'
 )
+
+# Aplicar filtro de cidade
+if selected_cidades:
+    df_filtered = df_filtered[df_filtered['Cidade'].isin(selected_cidades)]
 
 # Filtro de Produto
-all_produtos = sorted(df['Produto'].unique())
+produtos_disponiveis = sorted(df_filtered['Produto'].unique())
 selected_produtos = st.sidebar.multiselect(
-    "Selecione o(s) Produto(s)",
-    options=all_produtos,
-    default=st.session_state['selected_produtos'],
-    key='produto_filter' # Adicionado key para controle do estado
+    "📦 Selecione os produtos:",
+    options=produtos_disponiveis,
+    default=st.session_state.get('selected_produtos', []),
+    key='selected_produtos'
 )
 
-# --- Aplica os Filtros Globais ---
-df_filtrado = df.copy()
-
-if selected_months:
-    df_filtrado = df_filtrado[df_filtrado['Mês'].isin(selected_months)]
-
-if selected_estados:
-    df_filtrado = df_filtrado[df_filtrado['Estado'].isin(selected_estados)]
-
-if selected_cidades:
-    df_filtrado = df_filtrado[df_filtrado['Cidade'].isin(selected_cidades)]
-
+# Aplicar filtro de produto
 if selected_produtos:
-    df_filtrado = df_filtrado[df_filtrado['Produto'].isin(selected_produtos)]
+    df_filtered = df_filtered[df_filtered['Produto'].isin(selected_produtos)]
 
-
-if df_filtrado.empty:
-    st.warning("Nenhum dado encontrado para os filtros selecionados. Tente ajustar os filtros.")
+# Verificar se há dados após filtros
+if df_filtered.empty:
+    st.warning("⚠️ Nenhum dado encontrado com os filtros selecionados. Tente ajustar os filtros.")
     st.stop()
 
-# --- KPIs no Topo ---
-st.header("📊 Principais Indicadores")
+# Indicador de filtros aplicados
+filtros_ativos = []
+if selected_months: filtros_ativos.append(f"Meses: {len(selected_months)}")
+if selected_estados: filtros_ativos.append(f"Estados: {len(selected_estados)}")
+if selected_cidades: filtros_ativos.append(f"Cidades: {len(selected_cidades)}")
+if selected_produtos: filtros_ativos.append(f"Produtos: {len(selected_produtos)}")
 
-# AJUSTADO: Lógica condicional para KPIs de Faturamento Total e Total Pedidos
-if selected_produtos:
-    # Se há produtos selecionados, os KPIs refletem os produtos filtrados
-    total_faturamento = df_filtrado['Faturamento do Produto'].sum()
-    total_pedidos_kpi = df_filtrado['Pedidos com Produto'].sum()
+if filtros_ativos:
+    st.info(f"🎯 **Filtros ativos:** {' | '.join(filtros_ativos)} | **Registros:** {len(df_filtered):,}")
+
+# Determinar se estamos analisando produtos específicos ou todos
+analisando_produtos_especificos = bool(selected_produtos)
+
+# KPIs principais
+st.subheader("📊 Principais Indicadores")
+
+if analisando_produtos_especificos:
+    # KPIs para produtos selecionados
+    total_faturamento = df_filtered['Faturamento do Produto'].sum()
+    total_unidades = df_filtered['Unidades Compradas'].sum()
+    total_pedidos = df_filtered['Pedidos com Produto'].sum()
+    ticket_medio = total_faturamento / total_pedidos if total_pedidos > 0 else 0
+    
+    # Participação no faturamento total das cidades
+    faturamento_total_cidades = df_filtered['Faturamento Total da Cidade no Mês'].sum()
+    participacao_faturamento = (total_faturamento / faturamento_total_cidades * 100) if faturamento_total_cidades > 0 else 0
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">💰 Faturamento dos Produtos</div>
+            <div class="metric-value">{format_currency_br(total_faturamento)}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">📦 Total de Pedidos</div>
+            <div class="metric-value">{format_integer_br(total_pedidos)}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">📊 Unidades Compradas</div>
+            <div class="metric-value">{format_integer_br(total_unidades)}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col4:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">🎯 Ticket Médio</div>
+            <div class="metric-value">{format_currency_br(ticket_medio)}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col5:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">📈 % Partic. Faturamento</div>
+            <div class="metric-value">{participacao_faturamento:.2f}%</div>
+        </div>
+        """, unsafe_allow_html=True)
+
 else:
-    # Se não há produtos selecionados, os KPIs refletem o total da cidade
-    df_kpi_base = df_filtrado.groupby(['Mês', 'Cidade']).agg(
-        total_pedidos_cidade_mes=('Total de Pedidos da Cidade no Mês', 'first'),
-        faturamento_total_cidade_mes=('Faturamento Total da Cidade no Mês', 'first')
-    ).reset_index()
-    total_faturamento = df_kpi_base['faturamento_total_cidade_mes'].sum()
-    total_pedidos_kpi = df_kpi_base['total_pedidos_cidade_mes'].sum()
+    # KPIs gerais (quando nenhum produto específico está selecionado)
+    total_faturamento = df_filtered['Faturamento Total da Cidade no Mês'].sum()
+    total_pedidos = df_filtered['Total de Pedidos da Cidade no Mês'].sum()
+    ticket_medio_geral = total_faturamento / total_pedidos if total_pedidos > 0 else 0
+    cidades_unicas = df_filtered['Cidade'].nunique()
+    produtos_unicos = df_filtered['Produto'].nunique()
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">💰 Faturamento Total</div>
+            <div class="metric-value">{format_currency_br(total_faturamento)}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">📦 Total de Pedidos</div>
+            <div class="metric-value">{format_integer_br(total_pedidos)}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col3:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">🎯 Ticket Médio Geral</div>
+            <div class="metric-value">{format_currency_br(ticket_medio_geral)}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col4:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">🏙️ Cidades Atendidas</div>
+            <div class="metric-value">{cidades_unicas}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col5:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">📊 Produtos Únicos</div>
+            <div class="metric-value">{produtos_unicos}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
+        # ESTRUTURA CORRETA: 4 ABAS INTERNAS
+tab_produtos, tab_cidades, tab_estados, tab_diario = st.tabs(["📦 Top Produtos", "🏙️ Top Cidades", "🗺️ Top Estados", "📅 Análise Diária"])
 
-total_unidades_fisicas = df_filtrado['Unidades Compradas'].sum()
-
-# Calcula Ticket Médio Geral com base nos totais
-ticket_medio_geral = total_faturamento / total_pedidos_kpi if total_pedidos_kpi > 0 else 0
-
-# Participação do produto no faturamento total da cidade (em %)
-media_participacao_faturamento = df_filtrado['Participação Faturamento Cidade Mês (%)'].mean()
-
-
-col1, col2, col3, col4, col5 = st.columns(5)
-
-with col1:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-title">Faturamento Total</div>
-        <div class="metric-value">{format_currency_br(total_faturamento)}</div>
-    </div>
-    """, unsafe_allow_html=True)
-with col2:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-title">Total Pedidos</div>
-        <div class="metric-value">{format_integer_br(total_pedidos_kpi)}</div> </div>
-    """, unsafe_allow_html=True)
-with col3:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-title">Unidades Compradas</div>
-        <div class="metric-value">{format_integer_br(total_unidades_fisicas)}</div> </div>
-    """, unsafe_allow_html=True)
-with col4:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-title">Ticket Médio Geral</div>
-        <div class="metric-value">{format_currency_br(ticket_medio_geral)}</div>
-    </div>
-    """, unsafe_allow_html=True)
-with col5:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-title">% Partic. Faturamento Prod. (Méd.)</div>
-        <div class="metric-value">{media_participacao_faturamento:,.2f}%</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-st.markdown("---")
-
-# --- Análise de Desempenho (Produtos, Cidades, Estados) ---
-st.header("📈 Análise de Desempenho")
-
-tab_produtos, tab_cidades, tab_estados = st.tabs(["Top Produtos", "Top Cidades", "Top Estados"])
 
 with tab_produtos:
     st.subheader("Top Produtos por Métrica")
@@ -832,6 +960,298 @@ with col2:
         csv_resumo = resumo_final.to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📊 Download Resumo Executivo CSV",
+            data=csv_resumo,
+            file_name=f"resumo_executivo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv"
+        )
+
+with tab_diario:
+    # NOVA ABA DIÁRIA - SEPARADA E INDEPENDENTE
+    st.header("📅 Análise Diária")
+    
+    # Carregar dados diários
+    df_daily = load_daily_data()
+    
+    if df_daily.empty:
+        st.error("Não foi possível carregar os dados diários.")
+    else:
+        # Filtros para análise diária
+        st.subheader("🎛️ Filtros")
+        
+        col_filtro1, col_filtro2 = st.columns(2)
+        
+        with col_filtro1:
+            # Data padrão: mês corrente
+            hoje = datetime.now()
+            primeiro_dia_mes = hoje.replace(day=1)
+            
+            data_inicio = st.date_input(
+                "📅 Data Início:",
+                value=primeiro_dia_mes,
+                min_value=df_daily['data'].min(),
+                max_value=df_daily['data'].max()
+            )
+            
+            data_fim = st.date_input(
+                "📅 Data Fim:",
+                value=hoje,
+                min_value=df_daily['data'].min(),
+                max_value=df_daily['data'].max()
+            )
+        
+        with col_filtro2:
+            # Filtro de produtos baseado no período selecionado
+            df_periodo = df_daily[
+                (df_daily['data'] >= pd.to_datetime(data_inicio)) & 
+                (df_daily['data'] <= pd.to_datetime(data_fim))
+            ]
+            
+            produtos_disponiveis = sorted(df_periodo['nome_universal'].unique()) if not df_periodo.empty else []
+            produtos_selecionados = st.multiselect(
+                "🎯 Produtos:",
+                options=produtos_disponiveis,
+                default=[]
+            )
+        
+        # Aplicar filtros
+        df_daily_filtrado = df_daily[
+            (df_daily['data'] >= pd.to_datetime(data_inicio)) & 
+            (df_daily['data'] <= pd.to_datetime(data_fim))
+        ].copy()
+        
+        if produtos_selecionados:
+            df_daily_filtrado = df_daily_filtrado[df_daily_filtrado['nome_universal'].isin(produtos_selecionados)]
+        
+        if df_daily_filtrado.empty:
+            st.warning("Nenhum dado encontrado para os filtros selecionados.")
+        else:
+            # Indicador do período
+            st.info(f"📊 **Período**: {data_inicio.strftime('%d/%m/%Y')} a {data_fim.strftime('%d/%m/%Y')} | **Registros**: {len(df_daily_filtrado):,}")
+            
+            # KPIs Principais
+            st.subheader("📊 KPIs Principais")
+            
+            total_faturamento_diario = df_daily_filtrado['faturamento'].sum()
+            total_pedidos_diario = df_daily_filtrado['quantidade_pedidos'].sum()
+            total_unidades_diario = df_daily_filtrado['total_unidades'].sum()
+            ticket_medio_diario = total_faturamento_diario / total_pedidos_diario if total_pedidos_diario > 0 else 0
+            produtos_unicos = df_daily_filtrado['nome_universal'].nunique()
+            
+            col1, col2, col3, col4, col5 = st.columns(5)
+            
+            with col1:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-title">💰 Faturamento Total</div>
+                    <div class="metric-value">{format_currency_br(total_faturamento_diario)}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-title">📦 Total Pedidos</div>
+                    <div class="metric-value">{format_integer_br(total_pedidos_diario)}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col3:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-title">📊 Unidades Vendidas</div>
+                    <div class="metric-value">{format_integer_br(total_unidades_diario)}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col4:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-title">🎯 Ticket Médio</div>
+                    <div class="metric-value">{format_currency_br(ticket_medio_diario)}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col5:
+                st.markdown(f"""
+                <div class="metric-card">
+                    <div class="metric-title">🏷️ Produtos Únicos</div>
+                    <div class="metric-value">{produtos_unicos}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Gráficos
+            st.subheader("📈 Análises Visuais")
+            
+            col_graf1, col_graf2 = st.columns(2)
+            
+            with col_graf1:
+                # Tendência diária
+                df_tendencia = df_daily_filtrado.groupby('data').agg({
+                    'faturamento': 'sum',
+                    'quantidade_pedidos': 'sum'
+                }).reset_index().sort_values('data')
+                
+                fig_tendencia = px.line(
+                    df_tendencia,
+                    x='data',
+                    y='faturamento',
+                    title='Tendência de Faturamento Diário',
+                    labels={'faturamento': 'Faturamento (R$)', 'data': 'Data'}
+                )
+                fig_tendencia.update_layout(height=400)
+                st.plotly_chart(fig_tendencia, use_container_width=True)
+            
+            with col_graf2:
+                # Top 10 produtos
+                top_produtos_diario = df_daily_filtrado.groupby('nome_universal')['faturamento'].sum().nlargest(10).reset_index()
+                
+                fig_top_produtos = px.bar(
+                    top_produtos_diario,
+                    x='faturamento',
+                    y='nome_universal',
+                    orientation='h',
+                    title='Top 10 Produtos por Faturamento',
+                    labels={'faturamento': 'Faturamento (R$)', 'nome_universal': 'Produto'}
+                )
+                fig_top_produtos.update_layout(
+                    height=400,
+                    yaxis={'categoryorder': 'total ascending'}
+                )
+                st.plotly_chart(fig_top_produtos, use_container_width=True)
+            
+            # Análise de sazonalidade
+            st.subheader("📅 Análise de Sazonalidade")
+            
+            vendas_dia_semana = df_daily_filtrado.groupby('dia_semana').agg({
+                'faturamento': 'sum',
+                'quantidade_pedidos': 'sum'
+            }).reset_index()
+            
+            # Ordenar dias da semana
+            dias_ordem = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+            vendas_dia_semana['dia_ordem'] = vendas_dia_semana['dia_semana'].map({dia: i for i, dia in enumerate(dias_ordem)})
+            vendas_dia_semana = vendas_dia_semana.sort_values('dia_ordem')
+            
+            fig_sazonalidade = px.bar(
+                vendas_dia_semana,
+                x='dia_semana',
+                y='faturamento',
+                title='Faturamento por Dia da Semana',
+                labels={'dia_semana': 'Dia da Semana', 'faturamento': 'Faturamento'}
+            )
+            fig_sazonalidade.update_layout(height=400)
+            st.plotly_chart(fig_sazonalidade, use_container_width=True)
+            
+            # Insights automáticos baseados no mensal5.py
+            st.subheader("💡 Insights Automáticos")
+            
+            if not df_daily_filtrado.empty:
+                # Produto destaque
+                produto_destaque = df_daily_filtrado.groupby('nome_universal')['faturamento'].sum().idxmax()
+                faturamento_destaque = df_daily_filtrado.groupby('nome_universal')['faturamento'].sum().max()
+                participacao_destaque = (faturamento_destaque / total_faturamento_diario) * 100
+                
+                st.success(f"🏆 **Produto Destaque**: {produto_destaque} representa {participacao_destaque:.1f}% do faturamento total")
+                
+                # Melhor dia da semana
+                if not vendas_dia_semana.empty:
+                    melhor_dia = vendas_dia_semana.loc[vendas_dia_semana['faturamento'].idxmax(), 'dia_semana']
+                    pior_dia = vendas_dia_semana.loc[vendas_dia_semana['faturamento'].idxmin(), 'dia_semana']
+                    
+                    st.info(f"📅 **Sazonalidade**: Melhor dia da semana é {melhor_dia}, pior é {pior_dia}")
+                
+                # Análise de concentração (Pareto)
+                produtos_pareto = df_daily_filtrado.groupby('nome_universal')['faturamento'].sum().sort_values(ascending=False)
+                produtos_pareto_pct = (produtos_pareto.cumsum() / produtos_pareto.sum()) * 100
+                produtos_80_pct = len(produtos_pareto_pct[produtos_pareto_pct <= 80])
+                
+                st.warning(f"⚠️ **Concentração**: {produtos_80_pct} produtos ({(produtos_80_pct/len(produtos_pareto)*100):.1f}%) representam 80% do faturamento")
+            
+            # Tabela detalhada
+            st.subheader("📋 Dados Detalhados")
+            
+            df_display_diario = df_daily_filtrado.copy()
+            df_display_diario['data'] = df_display_diario['data'].dt.strftime('%d/%m/%Y')
+            df_display_diario['faturamento'] = df_display_diario['faturamento'].apply(format_currency_br)
+            df_display_diario['quantidade_pedidos'] = df_display_diario['quantidade_pedidos'].apply(format_integer_br)
+            df_display_diario['total_unidades'] = df_display_diario['total_unidades'].apply(format_integer_br)
+            
+            colunas_exibicao_diario = ['data', 'sku', 'nome_universal', 'quantidade_pedidos', 'total_unidades', 'faturamento']
+            
+            st.dataframe(
+                df_display_diario[colunas_exibicao_diario],
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            # Export de dados diários
+            st.subheader("📥 Export de Dados")
+            
+            csv_diario = df_daily_filtrado.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Dados Diários CSV",
+                data=csv_diario,
+                file_name=f"dados_diarios_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+
+# Tabela detalhada GERAL (ANÁLISE MENSAL)
+st.subheader("📋 Dados Detalhados")
+
+# Preparar dados para exibição
+df_display = df_filtered.copy()
+df_display['Mês'] = df_display['Mês'].dt.strftime('%m/%Y')
+df_display['Faturamento do Produto'] = df_display['Faturamento do Produto'].apply(format_currency_br)
+df_display['Faturamento Total da Cidade no Mês'] = df_display['Faturamento Total da Cidade no Mês'].apply(format_currency_br)
+df_display['Ticket Médio do Produto'] = df_display['Ticket Médio do Produto'].apply(format_currency_br)
+df_display['Unidades Compradas'] = df_display['Unidades Compradas'].apply(format_integer_br)
+df_display['Pedidos com Produto'] = df_display['Pedidos com Produto'].apply(format_integer_br)
+df_display['Total de Pedidos da Cidade no Mês'] = df_display['Total de Pedidos da Cidade no Mês'].apply(format_integer_br)
+df_display['Participação Faturamento Cidade Mês (%)'] = df_display['Participação Faturamento Cidade Mês (%)'].apply(lambda x: f"{x:.2f}%")
+df_display['Participação Pedidos Cidade Mês (%)'] = df_display['Participação Pedidos Cidade Mês (%)'].apply(lambda x: f"{x:.2f}%")
+
+# Selecionar colunas para exibição
+colunas_exibicao = [
+    'Mês', 'Estado', 'Cidade', 'Produto', 
+    'Faturamento do Produto', 'Unidades Compradas', 'Pedidos com Produto',
+    'Ticket Médio do Produto', 'Participação Faturamento Cidade Mês (%)'
+]
+
+st.dataframe(
+    df_display[colunas_exibicao], 
+    use_container_width=True,
+    hide_index=True
+)
+
+# Opção de download GERAL
+st.subheader("📥 Download dos Dados")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    # Download dados filtrados
+    csv_filtrado = df_filtered.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📊 Download Dados Filtrados (CSV)",
+        data=csv_filtrado,
+        file_name=f"dados_filtrados_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv"
+    )
+
+with col2:
+    # Download resumo executivo
+    if analisando_produtos_especificos:
+        resumo_data = {
+            'Produto': selected_produtos,
+            'Faturamento Total': [format_currency_br(df_filtered[df_filtered['Produto'] == produto]['Faturamento do Produto'].sum()) for produto in selected_produtos],
+            'Pedidos Total': [format_integer_br(df_filtered[df_filtered['Produto'] == produto]['Pedidos com Produto'].sum()) for produto in selected_produtos],
+            'Unidades Total': [format_integer_br(df_filtered[df_filtered['Produto'] == produto]['Unidades Compradas'].sum()) for produto in selected_produtos]
+        }
+        resumo_df = pd.DataFrame(resumo_data)
+        csv_resumo = resumo_df.to_csv(index=False).encode('utf-8')
+        
+        st.download_button(
+            label="📋 Download Resumo Executivo (CSV)",
             data=csv_resumo,
             file_name=f"resumo_executivo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv"
