@@ -144,7 +144,7 @@ def load_data():
     Carrega e pré-processa os dados da planilha do Google Sheets.
     """
     # **IMPORTANTE**: Certifique-se que esta URL e o nome da aba estão corretos e a planilha é pública para leitura.
-    sheet_id = 'sheet_id'
+    sheet_id = st.secrets["sheet_id"]
     tab_name = 'Produtos_Cidades_Completas'
     google_sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={tab_name}"
 
