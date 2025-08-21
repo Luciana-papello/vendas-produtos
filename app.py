@@ -175,10 +175,11 @@ def load_data():
     df = df.rename(columns=column_mapping)
 
     # Calcular Métricas Derivadas usando os nomes de coluna já renomeados
-    df.loc[:, 'Participação Faturamento Cidade Mês (%)'] = np.where(
-        df['Faturamento Total da Cidade no Mês'] == 0,
-        0,
-        (df['Faturamento do Produto'] / df['Faturamento Total da Cidade no Mês']) * 100
+    df['Participação Faturamento Cidade Mês (%)'] = (
+        df['Faturamento do Produto']
+        .div(df['Faturamento Total da Cidade no Mês'])
+        .replace([np.inf, -np.inf], 0)
+        .fillna(0) * 100
     )
 
     df.loc[:, 'Participação Pedidos Cidade Mês (%)'] = np.where(
