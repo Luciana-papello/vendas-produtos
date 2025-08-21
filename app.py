@@ -174,24 +174,33 @@ def load_data():
     # Renomear colunas para nomes amigáveis usando o mapping importado
     df = df.rename(columns=column_mapping)
 
-    # Calcular Métricas Derivadas usando os nomes de coluna já renomeados
-    df.loc[:, 'Participação Faturamento Cidade Mês (%)'] = np.where(
-        df['Faturamento Total da Cidade no Mês'] == 0,
-        0,
-        (df['Faturamento do Produto'] / df['Faturamento Total da Cidade no Mês']) * 100
-    )
+    # CORREÇÃO: Calcular Métricas Derivadas com tratamento robusto de divisão por zero
+    
+    # 1. Participação Faturamento Cidade Mês (%)
+    # Cria uma máscara para valores não zero no denominador
+    mask_fat = df['Faturamento Total da Cidade no Mês'] != 0
+    df.loc[:, 'Participação Faturamento Cidade Mês (%)'] = 0.0  # Inicializa com zero
+    df.loc[mask_fat, 'Participação Faturamento Cidade Mês (%)'] = (
+        df.loc[mask_fat, 'Faturamento do Produto'] / 
+        df.loc[mask_fat, 'Faturamento Total da Cidade no Mês']
+    ) * 100
 
-    df.loc[:, 'Participação Pedidos Cidade Mês (%)'] = np.where(
-        df['Total de Pedidos da Cidade no Mês'] == 0,
-        0,
-        (df['Pedidos com Produto'] / df['Total de Pedidos da Cidade no Mês']) * 100
-    )
+    # 2. Participação Pedidos Cidade Mês (%)
+    mask_ped = df['Total de Pedidos da Cidade no Mês'] != 0
+    df.loc[:, 'Participação Pedidos Cidade Mês (%)'] = 0.0  # Inicializa com zero
+    df.loc[mask_ped, 'Participação Pedidos Cidade Mês (%)'] = (
+        df.loc[mask_ped, 'Pedidos com Produto'] / 
+        df.loc[mask_ped, 'Total de Pedidos da Cidade no Mês']
+    ) * 100
 
-    df.loc[:, 'Ticket Médio do Produto'] = np.where(
-        df['Pedidos com Produto'] == 0,
-        0,
-        df['Faturamento do Produto'] / df['Pedidos com Produto']
+    # 3. Ticket Médio do Produto
+    mask_ticket = df['Pedidos com Produto'] != 0
+    df.loc[:, 'Ticket Médio do Produto'] = 0.0  # Inicializa com zero
+    df.loc[mask_ticket, 'Ticket Médio do Produto'] = (
+        df.loc[mask_ticket, 'Faturamento do Produto'] / 
+        df.loc[mask_ticket, 'Pedidos com Produto']
     )
+    
     return df
 
 df = load_data()
