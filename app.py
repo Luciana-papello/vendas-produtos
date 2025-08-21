@@ -176,24 +176,24 @@ def load_data():
 
     # Calcular Métricas Derivadas usando os nomes de coluna já renomeados
     df['Participação Faturamento Cidade Mês (%)'] = (
-        df['Faturamento do Produto']
-        .div(df['Faturamento Total da Cidade no Mês'])
-        .replace([np.inf, -np.inf], 0)
-        .fillna(0) * 100
+        pd.to_numeric(df['Faturamento do Produto'], errors='coerce').fillna(0)
+        .div(pd.to_numeric(df['Faturamento Total da Cidade no Mês'], errors='coerce').fillna(0).replace(0, np.nan))
+        .mul(100)
+        .fillna(0)
     )
 
     df.loc[:, 'Participação Pedidos Cidade Mês (%)'] = np.where(
-        df['Total de Pedidos da Cidade no Mês'] == 0,
-        0,
-        (df['Pedidos com Produto'] / df['Total de Pedidos da Cidade no Mês']) * 100
+        pd.to_numeric(df['Pedidos com Produto'], errors='coerce').fillna(0)
+        .div(pd.to_numeric(df['Total de Pedidos da Cidade no Mês'], errors='coerce').fillna(0).replace(0, np.nan))
+        .mul(100)
+        .fillna(0)
     )
 
-    df.loc[:, 'Ticket Médio do Produto'] = np.where(
-        df['Pedidos com Produto'] == 0,
-        0,
-        df['Faturamento do Produto'] / df['Pedidos com Produto']
+    df['Ticket Médio do Produto'] = (
+        pd.to_numeric(df['Faturamento do Produto'], errors='coerce').fillna(0)
+        .div(pd.to_numeric(df['Pedidos com Produto'], errors='coerce').fillna(0).replace(0, np.nan))
+        .fillna(0)
     )
-    return df
 
 df = load_data()
 
